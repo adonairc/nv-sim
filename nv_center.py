@@ -382,6 +382,179 @@ class NVCenter:
 
         return qt.expect(operator, state)
 
+    def apply_fem_mw_pulse(self, fem_data, B_static: np.ndarray,
+                          nv_position: Optional[np.ndarray] = None,
+                          e_ops: Optional[List] = None) -> qt.solver.Result:
+        """
+        Apply microwave pulse from FEM B-field data.
+
+        This method uses realistic time-dependent MW fields from FEM simulations
+        of antennas, providing accurate modeling of experimental conditions.
+
+        Parameters
+        ----------
+        fem_data : FEMBFieldData
+            FEM magnetic field data (from fem_bfield module)
+        B_static : array-like
+            Static background field [Bx, By, Bz] in Gauss
+        nv_position : array-like, optional
+            NV-center position [x, y, z] in cm for spatial field data
+        e_ops : list, optional
+            Expectation value operators to track
+
+        Returns
+        -------
+        result : Result
+            QuTiP solver result with final state
+
+        Examples
+        --------
+        >>> from fem_bfield import MicrowaveAntennaSimulator
+        >>> mw_pulse = MicrowaveAntennaSimulator.generate_pulsed_mw(
+        ...     duration=1.0, frequency=2.87, amplitude=0.5)
+        >>> result = nv.apply_fem_mw_pulse(mw_pulse, B_static=[0, 0, 10])
+        """
+        from fem_bfield import FEMBFieldData
+
+        if not isinstance(fem_data, FEMBFieldData):
+            raise TypeError("fem_data must be FEMBFieldData instance")
+
+        # Extract field at NV position if spatial
+        if fem_data.is_spatial:
+            if nv_position is None:
+                raise ValueError("nv_position required for spatial FEM data")
+            B_mw_local = fem_data.get_field_at_position(nv_position)
+        else:
+            B_mw_local = fem_data.B_field
+
+        # Build time-dependent Hamiltonian
+        # H = H_static + H_MW(t)
+
+        # Static part (zero-field splitting + static B-field)
+        H_static = self.hamiltonian_static(B_static)
+
+        # Move to rotating frame at MW frequency if provided
+        if fem_data.frequency is not None:
+            omega_mw = fem_data.frequency  # GHz
+            H_static = H_static - omega_mw * self.Sz
+
+        # Time-dependent MW Zeeman term: γ * B_MW(t) · S
+        gamma = self.params.gamma / 1000.0  # Convert MHz/G to GHz/G
+
+        # Create interpolators for MW field components
+        from scipy.interpolate import interp1d
+
+        interp_Bx = interp1d(fem_data.time, B_mw_local[:, 0], kind='linear',
+                            bounds_error=False, fill_value=0.0)
+        interp_By = interp1d(fem_data.time, B_mw_local[:, 1], kind='linear',
+                            bounds_error=False, fill_value=0.0)
+        interp_Bz = interp1d(fem_data.time, B_mw_local[:, 2], kind='linear',
+                            bounds_error=False, fill_value=0.0)
+
+        # Coefficient functions for time-dependent Hamiltonian
+        def coeff_x(t, args):
+            return gamma * float(interp_Bx(t))
+
+        def coeff_y(t, args):
+            return gamma * float(interp_By(t))
+
+        def coeff_z(t, args):
+            return gamma * float(interp_Bz(t))
+
+        # Build Hamiltonian list
+        H_list = [
+            H_static,
+            [self.Sx, coeff_x],
+            [self.Sy, coeff_y],
+            [self.Sz, coeff_z]
+        ]
+
+        # Evolve
+        result = self.evolve_time_dependent(H_list, fem_data.time,
+                                           state_init=self.state,
+                                           e_ops=e_ops)
+
+        return result
+
+    def rabi_with_fem_antenna(self, antenna_type: str, distance: float,
+                             duration_max: float, n_points: int = 100,
+                             power: float = 1.0, frequency: float = None,
+                             **antenna_kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Simulate Rabi oscillations with realistic antenna-generated MW field.
+
+        Parameters
+        ----------
+        antenna_type : str
+            'wire' or 'cpw'
+        distance : float
+            Distance from antenna to NV (cm)
+        duration_max : float
+            Maximum pulse duration (µs)
+        n_points : int
+            Number of duration points
+        power : float
+            Microwave power (W)
+        frequency : float, optional
+            MW frequency (GHz). Uses D if None.
+        **antenna_kwargs : dict
+            Additional antenna parameters
+
+        Returns
+        -------
+        durations : array
+            Pulse durations
+        populations : array
+            Population in ms=0 state
+        """
+        from fem_bfield import MicrowaveAntennaSimulator
+
+        if frequency is None:
+            frequency = self.params.D
+
+        durations = np.linspace(0, duration_max, n_points)
+        populations = np.zeros(n_points)
+
+        # Calculate MW field amplitude at NV position
+        nv_pos = np.array([0, 0, distance])  # NV above antenna
+
+        if antenna_type == 'wire':
+            B_amp = MicrowaveAntennaSimulator.wire_antenna(
+                nv_pos, power=power, frequency=frequency, **antenna_kwargs)
+        elif antenna_type == 'cpw':
+            B_amp, _ = MicrowaveAntennaSimulator.coplanar_waveguide(
+                nv_pos, power=power, **antenna_kwargs)
+        else:
+            raise ValueError(f"Unknown antenna type: {antenna_type}")
+
+        # Run Rabi with this amplitude
+        for i, duration in enumerate(durations):
+            if duration == 0:
+                self.reset_to_ground()
+                _, P0, _ = self.measure_population()
+                populations[i] = P0
+                continue
+
+            # Generate MW pulse
+            mw_pulse = MicrowaveAntennaSimulator.generate_pulsed_mw(
+                duration=duration,
+                frequency=frequency,
+                amplitude=B_amp,
+                envelope='rectangular',
+                n_points=max(50, int(duration * 100))
+            )
+
+            # Apply pulse
+            self.reset_to_ground()
+            B_static = np.array([0, 0, 0])  # Can add static field if needed
+            result = self.apply_fem_mw_pulse(mw_pulse, B_static)
+
+            # Measure
+            _, P0, _ = self.measure_population()
+            populations[i] = P0
+
+        return durations, populations
+
 
 class PulseSequence:
     """

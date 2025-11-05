@@ -11,6 +11,9 @@ scipy>=1.7.0
 # Visualization
 matplotlib>=3.5.0
 
+# Optional: FEM data I/O (recommended for large datasets)
+# h5py>=3.0.0          # HDF5 file format support
+
 # Optional: Enhanced performance
 # numba>=0.55.0        # JIT compilation for speed
 # cython>=0.29.0       # C extensions

@@ -32,6 +32,13 @@ A comprehensive Python simulation framework for nitrogen-vacancy (NV) centers in
   - Density matrices
   - State trajectories
 
+- **FEM Integration** (NEW):
+  - Import B-field data from FEM software (COMSOL, ANSYS, CST)
+  - Realistic antenna modeling (wire, CPW, custom)
+  - Spatial field profiles and multi-NV simulations
+  - Time-domain MW pulse synthesis with envelopes
+  - Support for CSV, HDF5, NPY formats
+
 ## Installation
 
 ### Requirements
@@ -90,20 +97,16 @@ plt.show()
 ### Run Example Scripts
 
 ```bash
-# Rabi oscillations
-python example_rabi.py
+# Basic pulse sequences
+python example_rabi.py           # Rabi oscillations
+python example_ramsey.py         # Ramsey interferometry (T2*)
+python example_hahn_echo.py      # Hahn echo (T2)
+python example_odmr.py           # ODMR spectroscopy
+python example_bfield_dynamics.py # B-field dynamics
 
-# Ramsey interferometry (T2* measurement)
-python example_ramsey.py
-
-# Hahn echo (T2 measurement)
-python example_hahn_echo.py
-
-# ODMR spectroscopy
-python example_odmr.py
-
-# Realistic B-field dynamics and control
-python example_bfield_dynamics.py
+# FEM antenna integration (NEW)
+python example_fem_antenna.py    # FEM-driven MW pulses
+python example_fem_import.py     # Import FEM data
 ```
 
 ## Documentation
@@ -217,6 +220,232 @@ plot_pulse_sequence_diagram('hahn')
 
 # Create comprehensive summary
 fig = create_summary_plot(nv, B_field, params)
+```
+
+## FEM Integration for Realistic Antenna Modeling
+
+### Overview
+
+The simulator now supports importing and using B-field data from FEM (Finite Element Method) simulations of microwave antennas. This enables realistic modeling of experimental conditions with:
+- Actual antenna geometries and field distributions
+- Spatially-varying MW fields
+- Realistic pulse envelopes and rise times
+- Multi-NV simulations with inhomogeneous broadening
+
+### Loading FEM Data
+
+```python
+from fem_bfield import FEMBFieldLoader, FEMBFieldData
+
+# Load from CSV (e.g., COMSOL export)
+fem_data = FEMBFieldLoader.load_csv(
+    'antenna_field.csv',
+    time_col=0, Bx_col=1, By_col=2, Bz_col=3,
+    time_unit='us', field_unit='G'
+)
+
+# Load from NumPy NPZ (recommended for Python)
+fem_data = FEMBFieldLoader.load_npy('antenna_field.npz')
+
+# Load from HDF5 (for large datasets)
+fem_data = FEMBFieldLoader.load_hdf5('antenna_field.h5')
+```
+
+### Generating Synthetic Antenna Fields
+
+```python
+from fem_bfield import MicrowaveAntennaSimulator
+
+# Generate pulsed MW with envelope
+mw_pulse = MicrowaveAntennaSimulator.generate_pulsed_mw(
+    duration=1.0,          # µs
+    frequency=2.87,        # GHz
+    amplitude=0.5,         # Gauss
+    envelope='gaussian',   # 'gaussian', 'rectangular', 'sech', 'raised_cosine'
+    n_points=1000
+)
+
+# Wire antenna model
+nv_position = np.array([0, 0, 0.01])  # 100 µm above antenna
+B_amplitude = MicrowaveAntennaSimulator.wire_antenna(
+    nv_position,
+    wire_length=0.5,  # cm
+    power=1.0,        # Watts
+    frequency=2.87    # GHz
+)
+
+# Coplanar waveguide (CPW) model
+B_amplitude, angle = MicrowaveAntennaSimulator.coplanar_waveguide(
+    nv_position,
+    width=0.02,   # cm (200 µm center conductor)
+    gap=0.01,     # cm (100 µm gap)
+    power=1.0     # Watts
+)
+```
+
+### Using FEM Data in Simulations
+
+```python
+# Apply FEM MW pulse to NV-center
+nv = NVCenter(params=params)
+nv.reset_to_ground()
+
+B_static = np.array([0, 0, 10.0])  # Static bias field (Gauss)
+
+# For point data
+result = nv.apply_fem_mw_pulse(fem_data, B_static)
+
+# For spatial data (specify NV position)
+nv_position = np.array([0, 0, 0.01])  # cm
+result = nv.apply_fem_mw_pulse(fem_data, B_static, nv_position=nv_position)
+
+# Track expectation values during pulse
+result = nv.apply_fem_mw_pulse(
+    fem_data, B_static,
+    e_ops=[nv.Sx, nv.Sy, nv.Sz]
+)
+
+# Access results
+final_state = result.states[-1]
+Sz_evolution = result.expect[2]
+```
+
+### Rabi Oscillations with Realistic Antenna
+
+```python
+# Quick method for antenna-driven Rabi
+durations, populations = nv.rabi_with_fem_antenna(
+    antenna_type='cpw',     # 'wire' or 'cpw'
+    distance=0.01,          # cm from antenna
+    duration_max=1.0,       # µs
+    power=1.0,              # Watts
+    width=0.02,             # cm (for CPW)
+    gap=0.01                # cm (for CPW)
+)
+
+plt.plot(durations, populations)
+plt.xlabel('Duration (µs)')
+plt.ylabel('Population in |0⟩')
+```
+
+### Spatial Field Profiles
+
+```python
+# Generate 3D spatial field from antenna
+spatial_data = MicrowaveAntennaSimulator.generate_spatial_field(
+    antenna_type='cpw',
+    grid_size=(20, 20, 30),     # nx, ny, nz
+    grid_spacing=0.005,         # cm (50 µm)
+    time_points=np.linspace(0, 1, 100),
+    frequency=2.87,
+    power=1.0
+)
+
+# Extract field at multiple NV positions
+nv_positions = [
+    np.array([0, 0, 0.005]),
+    np.array([0, 0, 0.010]),
+    np.array([0, 0, 0.020])
+]
+
+for pos in nv_positions:
+    B_local = spatial_data.get_field_at_position(pos)
+    # Use B_local for simulation...
+```
+
+### Supported FEM Software
+
+#### COMSOL Multiphysics
+```python
+# 1. In COMSOL: Export → Data → Cut Point/Line/Plane
+# 2. Select electromagnetic.normH (B-field)
+# 3. Export as CSV with columns: x, y, z, time, Bx, By, Bz
+
+fem_data = FEMBFieldLoader.load_csv(
+    'comsol_export.csv',
+    time_unit='us',
+    field_unit='T'  # Convert from Tesla
+)
+```
+
+#### ANSYS HFSS
+```python
+# 1. In HFSS: Fields → Export → Field Data
+# 2. Select B-field components
+# 3. Export as text file
+
+# Convert and save as NPZ
+data = np.loadtxt('hfss_export.txt')
+np.savez('hfss_bfield.npz',
+         time=data[:, 0],
+         B_field=data[:, 1:4],
+         frequency=2.87)
+
+fem_data = FEMBFieldLoader.load_npy('hfss_bfield.npz')
+```
+
+#### CST Microwave Studio
+```python
+# 1. In CST: Post-processing → Export → ASCII
+# 2. Select H-field (magnetic)
+# 3. Convert to Gauss and save
+
+fem_data = FEMBFieldLoader.load_csv(
+    'cst_export.txt',
+    delimiter='\t',  # CST uses tabs
+    time_unit='ns',
+    field_unit='mT'
+)
+```
+
+### Multi-NV Simulations
+
+```python
+# Simulate ensemble of NVs with spatial field gradient
+n_nvs = 100
+nv_positions = np.random.rand(n_nvs, 3) * 0.01  # Random in 100µm cube
+
+results = []
+for pos in nv_positions:
+    nv.reset_to_ground()
+    result = nv.apply_fem_mw_pulse(spatial_data, B_static, nv_position=pos)
+    _, P0, _ = nv.measure_population()
+    results.append(P0)
+
+# Analyze inhomogeneous broadening
+plt.hist(results, bins=20)
+plt.xlabel('Final Population')
+plt.ylabel('Number of NVs')
+```
+
+### File Format Specifications
+
+#### CSV Format
+```
+time_us,Bx_G,By_G,Bz_G
+0.0,0.0,0.0,0.0
+0.01,0.234,0.456,0.001
+0.02,0.467,0.890,0.002
+...
+```
+
+#### NPZ Format (Recommended)
+```python
+np.savez('bfield_data.npz',
+         time=time_array,        # (n_times,) in µs
+         B_field=B_array,        # (n_times, 3) in Gauss
+         frequency=2.87,         # GHz
+         position=pos_array)     # (3,) or (nx, ny, nz, 3) in cm
+```
+
+#### HDF5 Format (Large Datasets)
+```python
+import h5py
+with h5py.File('bfield_data.h5', 'w') as f:
+    f.create_dataset('time', data=time_array)
+    f.create_dataset('B_field', data=B_array)
+    f.create_dataset('frequency', data=2.87)
+    f.attrs['units'] = 'time:us, field:Gauss, position:cm'
 ```
 
 ## Physical Parameters
@@ -345,6 +574,8 @@ nv_nuclear = NVCenter(params=params, include_nuclear=True)
 | `example_hahn_echo.py` | Hahn echo sequence | T2 measurement, refocusing |
 | `example_odmr.py` | ODMR spectroscopy | Magnetic field sensing, energy levels |
 | `example_bfield_dynamics.py` | Realistic B-field control | AC magnetometry, noise, dynamical decoupling |
+| `example_fem_antenna.py` | **FEM antenna MW pulses** | **Realistic antennas, pulse envelopes, spatial profiles** |
+| `example_fem_import.py` | **FEM data import** | **COMSOL/ANSYS/CST integration, multi-NV ensembles** |
 
 Each example generates publication-quality plots and detailed analysis.
 
@@ -419,6 +650,21 @@ For questions, issues, or suggestions:
 - Refer to NV-center literature for physics questions
 
 ## Changelog
+
+### Version 1.1.0 (2025-11-05)
+- **NEW: FEM Integration**
+  - Load B-field data from FEM software (COMSOL, ANSYS, CST)
+  - Realistic antenna modeling (wire, coplanar waveguide)
+  - Spatial field profiles and interpolation
+  - Time-domain MW pulse synthesis with envelopes
+  - Multi-NV simulations with inhomogeneous broadening
+  - Support for CSV, NPZ, HDF5 file formats
+- **NEW: NVCenter methods**
+  - `apply_fem_mw_pulse()` - Use FEM data as MW drive
+  - `rabi_with_fem_antenna()` - Antenna-driven Rabi scans
+- **NEW: Examples**
+  - `example_fem_antenna.py` - FEM antenna demonstrations
+  - `example_fem_import.py` - FEM data import tutorial
 
 ### Version 1.0.0 (2025-11-05)
 - Initial release
