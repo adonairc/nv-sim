@@ -32,12 +32,20 @@ A comprehensive Python simulation framework for nitrogen-vacancy (NV) centers in
   - Density matrices
   - State trajectories
 
-- **FEM Integration** (NEW):
+- **FEM Integration**:
   - Import B-field data from FEM software (COMSOL, ANSYS, CST)
   - Realistic antenna modeling (wire, CPW, custom)
   - Spatial field profiles and multi-NV simulations
   - Time-domain MW pulse synthesis with envelopes
   - Support for CSV, HDF5, NPY formats
+
+- **Full Optical Dynamics** (NEW):
+  - Extended 8-level structure (ground + excited + singlet states)
+  - Quantum master equation (Lindblad form) with dissipation
+  - Spin-dependent intersystem crossing (ISC)
+  - Optical pumping to ms=0 initialization
+  - Realistic photoluminescence (PL) contrast (~30%)
+  - Proper ODMR simulation with optical readout
 
 ## Installation
 
@@ -104,9 +112,13 @@ python example_hahn_echo.py      # Hahn echo (T2)
 python example_odmr.py           # ODMR spectroscopy
 python example_bfield_dynamics.py # B-field dynamics
 
-# FEM antenna integration (NEW)
+# FEM antenna integration
 python example_fem_antenna.py    # FEM-driven MW pulses
 python example_fem_import.py     # Import FEM data
+
+# Optical dynamics (NEW)
+python example_optical_dynamics.py     # Full optical model with PL contrast
+python example_optical_vs_coherent.py  # Compare optical vs coherent models
 ```
 
 ## Documentation
@@ -222,11 +234,164 @@ plot_pulse_sequence_diagram('hahn')
 fig = create_summary_plot(nv, B_field, params)
 ```
 
+## Optical Dynamics and PL Contrast (NEW)
+
+### Overview
+
+The simulator includes a complete optical dynamics module that properly simulates photoluminescence (PL) contrast by solving the quantum master equation with the full NV-center level structure.
+
+**Level Structure:**
+```
+Ground ³A₂:    |g,-1⟩  |g,0⟩  |g,+1⟩
+Excited ³E:    |e,-1⟩  |e,0⟩  |e,+1⟩
+Singlet ¹A₁:   |sA⟩
+Singlet ¹E:    |sE⟩
+────────────────────────────────────
+Total: 8 levels (simplified) or 9 (full singlet structure)
+```
+
+**Physical Processes:**
+1. Optical excitation: ³A₂ → ³E (532 nm laser, spin-preserving)
+2. Radiative decay: ³E → ³A₂ (637-800 nm, produces fluorescence)
+3. Intersystem crossing (ISC): ³E → ¹A₁ → ¹E → ³A₂ (spin-dependent, non-radiative)
+   - ms=0: Low ISC rate (~10 MHz) → High fluorescence
+   - ms=±1: High ISC rate (~100 MHz) → Low fluorescence
+4. Singlet preferentially decays to ms=0 (optical pumping)
+
+**Result:** ~20-30% PL contrast between bright (ms=0) and dark (ms=±1) states
+
+### Basic Usage
+
+```python
+from optical_dynamics import ExtendedNVCenter, OpticalParameters
+
+# Initialize with default parameters
+nv = ExtendedNVCenter()
+
+# Optical pumping (initialize to ms=0)
+B_field = np.array([0, 0, 10.0])  # Gauss
+result = nv.optical_pumping_cycle(duration=2.0, B_field=B_field)
+
+# Check ground state populations
+P_minus1, P_0, P_plus1 = nv.get_ground_state_populations()
+print(f"Pumped to ms=0: {P_0*100:.1f}%")  # Typically >80%
+
+# Measure photoluminescence
+PL_bright = nv.measure_PL(B_field=B_field)
+
+# Measure from dark state
+nv.reset_to_ground(ms=1)
+PL_dark = nv.measure_PL(B_field=B_field)
+
+# Calculate contrast
+contrast = (PL_bright - PL_dark) / PL_bright * 100
+print(f"PL contrast: {contrast:.1f}%")  # Typically ~30%
+```
+
+### Realistic ODMR Simulation
+
+```python
+from optical_dynamics import simulate_ODMR_with_PL_contrast
+from nv_center import NVParameters
+
+# Simulate ODMR with realistic PL contrast
+freqs, PL_signal = simulate_ODMR_with_PL_contrast(
+    nv_params=NVParameters(),
+    optical_params=OpticalParameters(),
+    B_field=np.array([0, 0, 10.0]),
+    freq_range=(2.82, 2.92),  # GHz
+    n_points=200,
+    mw_duration=5.0,           # µs
+    mw_power=10.0              # MHz Rabi frequency
+)
+
+# Plot ODMR
+plt.plot(freqs, PL_signal)
+plt.xlabel('MW Frequency (GHz)')
+plt.ylabel('Normalized PL')
+plt.title('Realistic ODMR with PL Contrast')
+plt.gca().invert_yaxis()  # Dips point down
+```
+
+### Configurable Parameters
+
+```python
+optical_params = OpticalParameters(
+    gamma_laser=50.0,        # MHz - laser excitation rate (~1 mW)
+    gamma_radiative=83.0,    # MHz - excited state decay (τ ~12 ns)
+    gamma_ISC_0=10.0,        # MHz - ISC rate for ms=0
+    gamma_ISC_pm1=100.0,     # MHz - ISC rate for ms=±1 (10x faster!)
+    gamma_singlet_A=3.0,     # MHz - singlet A decay
+    gamma_singlet_E=5.0,     # MHz - singlet E decay
+    singlet_branching=(0.1, 0.8, 0.1),  # Decay to (ms=-1, 0, +1)
+    D_excited=1.42,          # GHz - excited state ZFS
+    gamma_dephasing_excited=100.0  # MHz - pure dephasing
+)
+```
+
+### Master Equation Evolution
+
+```python
+# Time-dependent evolution with master equation
+tlist = np.linspace(0, 5.0, 100)  # µs
+
+# With laser on (optical pumping)
+result = nv.evolve_master_equation(
+    tlist,
+    B_field=np.array([0, 0, 10.0]),
+    laser_on=True
+)
+
+# With MW drive (no laser)
+mw_params = {
+    'omega': 2.87,      # GHz - MW frequency
+    'amplitude': 10.0,  # MHz - Rabi frequency
+    'phase': 0.0        # radians
+}
+
+result = nv.evolve_master_equation(
+    tlist,
+    B_field=np.array([0, 0, 10.0]),
+    laser_on=False,
+    mw_params=mw_params,
+    e_ops=[nv.proj['g,0'], nv.proj['e,0']]  # Track populations
+)
+
+# Access results
+ground_pop = result.expect[0]
+excited_pop = result.expect[1]
+```
+
+### When to Use Each Model
+
+**Coherent Model** (`nv_center.py` - Schrödinger equation):
+- ✓ Fast (~10-100x faster)
+- ✓ Pure MW pulse sequences
+- ✓ Ideal coherent control
+- ✓ Long evolution times (>10 µs)
+- ✗ No optical effects
+- ✗ No PL contrast
+- ✗ No dissipation
+
+**Optical Model** (`optical_dynamics.py` - Master equation):
+- ✓ Realistic PL contrast (~30%)
+- ✓ Optical pumping/initialization
+- ✓ ODMR simulation
+- ✓ Dissipation and decoherence
+- ✗ Slower computation
+- ✗ Best for short times (<5 µs)
+
+**Recommended Workflow:**
+1. Design pulse sequences with coherent model (fast)
+2. Validate with optical model for realism
+3. Account for PL contrast in experimental planning
+4. Use optical pumping time ~1-2 µs before experiments
+
 ## FEM Integration for Realistic Antenna Modeling
 
 ### Overview
 
-The simulator now supports importing and using B-field data from FEM (Finite Element Method) simulations of microwave antennas. This enables realistic modeling of experimental conditions with:
+The simulator supports importing and using B-field data from FEM (Finite Element Method) simulations of microwave antennas. This enables realistic modeling of experimental conditions with:
 - Actual antenna geometries and field distributions
 - Spatially-varying MW fields
 - Realistic pulse envelopes and rise times
@@ -574,8 +739,10 @@ nv_nuclear = NVCenter(params=params, include_nuclear=True)
 | `example_hahn_echo.py` | Hahn echo sequence | T2 measurement, refocusing |
 | `example_odmr.py` | ODMR spectroscopy | Magnetic field sensing, energy levels |
 | `example_bfield_dynamics.py` | Realistic B-field control | AC magnetometry, noise, dynamical decoupling |
-| `example_fem_antenna.py` | **FEM antenna MW pulses** | **Realistic antennas, pulse envelopes, spatial profiles** |
-| `example_fem_import.py` | **FEM data import** | **COMSOL/ANSYS/CST integration, multi-NV ensembles** |
+| `example_fem_antenna.py` | FEM antenna MW pulses | Realistic antennas, pulse envelopes, spatial profiles |
+| `example_fem_import.py` | FEM data import | COMSOL/ANSYS/CST integration, multi-NV ensembles |
+| `example_optical_dynamics.py` | **Optical dynamics & PL** | **Master equation, spin-dependent ISC, realistic ODMR** |
+| `example_optical_vs_coherent.py` | **Model comparison** | **When to use optical vs coherent models** |
 
 Each example generates publication-quality plots and detailed analysis.
 
@@ -650,6 +817,32 @@ For questions, issues, or suggestions:
 - Refer to NV-center literature for physics questions
 
 ## Changelog
+
+### Version 1.2.0 (2025-11-05)
+- **NEW: Full Optical Dynamics Module** (`optical_dynamics.py`)
+  - Extended 8-level structure (ground ³A₂ + excited ³E + singlets ¹A₁, ¹E)
+  - Quantum master equation solver (Lindblad form)
+  - Spin-dependent intersystem crossing (ISC)
+  - Optical pumping to ms=0 initialization
+  - Realistic photoluminescence (PL) contrast (~30%)
+  - Proper ODMR simulation with optical readout
+- **NEW: ExtendedNVCenter class**
+  - `optical_pumping_cycle()` - Initialize to ms=0 via optical pumping
+  - `measure_PL()` - Measure realistic fluorescence signal
+  - `evolve_master_equation()` - Master equation evolution with dissipation
+  - `collapse_operators()` - Build Lindblad operators for ISC, decay, dephasing
+- **NEW: Helper functions**
+  - `simulate_ODMR_with_PL_contrast()` - Complete ODMR with realistic contrast
+- **NEW: OpticalParameters dataclass**
+  - Configure all optical rates (excitation, decay, ISC, singlet cascade)
+  - Tune PL contrast via ISC rate ratios
+- **NEW: Examples**
+  - `example_optical_dynamics.py` - Comprehensive optical physics demonstrations
+  - `example_optical_vs_coherent.py` - Model comparison and selection guide
+- **Documentation**
+  - Complete optical dynamics guide in README
+  - When to use optical vs coherent models
+  - Typical PL contrast values and physics
 
 ### Version 1.1.0 (2025-11-05)
 - **NEW: FEM Integration**
